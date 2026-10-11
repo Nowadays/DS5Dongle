@@ -14,6 +14,18 @@ static uint32_t key_release_time = 0;
 static uint32_t last_high_time   = 0;
 static bool is_ps_pressed        = false;
 static bool combo_fired          = false;
+static uint32_t shoulders_since  = 0;
+static bool hold_combo_used      = false;
+static bool overlay_shown        = false;
+
+static void send_combo_key(uint8_t key, uint32_t now) {
+    uint8_t keys[6] = { key };
+    tud_hid_n_keyboard_report(PS_KBD_INSTANCE, 0,
+        KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_LEFTSHIFT,
+        keys);
+    key_release_pending = true;
+    key_release_time    = now + 30;
+}
 
 void ps_shortcut_reset() {
     if (key_release_pending && tud_hid_n_ready(PS_KBD_INSTANCE)) {
@@ -27,6 +39,9 @@ void ps_shortcut_reset() {
     last_high_time      = 0;
     is_ps_pressed       = false;
     combo_fired         = false;
+    shoulders_since     = 0;
+    hold_combo_used     = false;
+    overlay_shown       = false;
 }
 
 void ps_shortcut_tick(const uint8_t *data, uint16_t len) {
@@ -61,13 +76,29 @@ void ps_shortcut_tick(const uint8_t *data, uint16_t len) {
         else if (hat == 4) combo_key = HID_KEY_S; // Down  -> Ctrl+Alt+Shift+S (host shutdown hotkey)
         else if (hat == 2) combo_key = HID_KEY_A; // Right -> Ctrl+Alt+Shift+A (cancel shutdown)
         if (combo_key && tud_hid_n_ready(PS_KBD_INSTANCE)) {
-            uint8_t keys[6] = { combo_key };
-            tud_hid_n_keyboard_report(PS_KBD_INSTANCE, 0,
-                KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_LEFTALT | KEYBOARD_MODIFIER_LEFTSHIFT,
-                keys);
-            combo_fired         = true;
-            key_release_pending = true;
-            key_release_time    = now + 30;
+            send_combo_key(combo_key, now);
+            combo_fired     = true;
+            hold_combo_used = true;
+        }
+    }
+
+    // Cheat-sheet overlay: shoulders held alone for 300 ms -> Ctrl+Alt+Shift+O
+    // (host shows tools/combo-overlay.ps1); releasing them -> Ctrl+Alt+Shift+H
+    // (hide). Skipped when a D-pad combo was already used during this hold.
+    // O and H sit at the same place on QWERTY and AZERTY.
+    if (shoulders_held) {
+        if (shoulders_since == 0) shoulders_since = now ? now : 1;
+        if (!overlay_shown && !hold_combo_used && hat == 8 && now - shoulders_since >= 300 &&
+            !key_release_pending && tud_hid_n_ready(PS_KBD_INSTANCE)) {
+            send_combo_key(HID_KEY_O, now);
+            overlay_shown = true;
+        }
+    } else {
+        shoulders_since = 0;
+        hold_combo_used = false;
+        if (overlay_shown && !key_release_pending && tud_hid_n_ready(PS_KBD_INSTANCE)) {
+            send_combo_key(HID_KEY_H, now);
+            overlay_shown = false;
         }
     }
 
