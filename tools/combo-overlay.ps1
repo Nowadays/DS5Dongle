@@ -22,8 +22,8 @@ if ($Hide) {
 
 # Libellés affichés (à adapter aux profils Display Magician réels).
 $labels = @{
-    Up    = 'Profil écran G'
-    Left  = 'Profil écran D'
+    Up    = 'Gaming profile'
+    Left  = 'Desktop profile'
     Down  = 'Éteindre le PC'
     Right = 'Annuler extinction'
 }
