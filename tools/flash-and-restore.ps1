@@ -23,6 +23,7 @@ $cfgLines = & $py $configTool get | Select-String '^\s+(\w+)\s+=\s+(\S+)' | ForE
     if ($n -ne 'config_version') { "$n=$v" }
 }
 Write-Host ("  " + ($cfgLines -join ' '))
+if (-not $cfgLines) { throw "sauvegarde de la config vide (lecture echouee ?) - abandon avant reflash, sinon la config serait perdue" }
 
 Write-Host "[2/5] Reboot vers BOOTSEL..."
 & $py (Join-Path $PSScriptRoot 'reboot_bootsel.py') | Out-Null
