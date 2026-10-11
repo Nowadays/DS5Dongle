@@ -6,3 +6,5 @@ example
 .DS_Store
 .cache
 /tools/__pycache__
+/tools/*.uf2
+/tools/*.log
