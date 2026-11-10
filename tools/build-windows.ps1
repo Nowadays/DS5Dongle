@@ -59,11 +59,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Bump on every change so a stale download is obvious in the banner.
-$SCRIPT_REV   = '2026-05-16.7'
+$SCRIPT_REV   = '2026-10-17.1'
 
 # --- Pinned versions: keep in sync with .github/workflows/build-firmware.yml ---
-$PICO_SDK_REF = '2.2.0'
-$TINYUSB_REF  = '0.20.0'
+$PICO_SDK_REF = '2.3.1'
+# TinyUSB master past 0.21.0: Pico SDK 2.3.1 still records 0.18.0 in its
+# submodule, so this is a commit rather than a tag (see Ensure-PicoSdk).
+$TINYUSB_REF  = '98741b55959564746998d0453c32d87064629d7c'
 $ARM_VER      = '14.2.rel1'
 $ARM_ZIP      = "arm-gnu-toolchain-$ARM_VER-mingw-w64-x86_64-arm-none-eabi.zip"
 $ARM_URL      = "https://developer.arm.com/-/media/Files/downloads/gnu/$ARM_VER/binrel/$ARM_ZIP"
@@ -247,26 +249,58 @@ function Ensure-HostCompiler {
     Ok "Host compiler: $binDir"
 }
 
-# --- Pico SDK 2.2.0 + TinyUSB 0.20.0 (mirrors build-firmware.yml) -------------
+# --- Pico SDK 2.3.1 + TinyUSB 98741b55 (mirrors build-firmware.yml) -----------
 function Ensure-PicoSdk {
+    $sdkSwitched = $false
     if (-not (Test-Path (Join-Path $SdkPath 'pico_sdk_init.cmake'))) {
         Info "Cloning Pico SDK $PICO_SDK_REF..."
-        git clone --depth 1 --branch $PICO_SDK_REF `
+        Invoke-GitQuiet clone --depth 1 --branch $PICO_SDK_REF `
             https://github.com/raspberrypi/pico-sdk.git $SdkPath
-        git -C $SdkPath submodule update --init --recursive
+        if ($GitExit -ne 0) { Die "Could not clone Pico SDK $PICO_SDK_REF." }
     } else {
-        Ok 'Pico SDK already present.'
-    }
-    $tinyusb = Join-Path $SdkPath 'lib\tinyusb'
-    $onTag = (git -C $tinyusb describe --tags --exact-match 2>$null)
-    if ($onTag -ne $TINYUSB_REF) {
-        Info "Switching TinyUSB to $TINYUSB_REF..."
-        if (-not (git -C $tinyusb rev-parse -q --verify "refs/tags/$TINYUSB_REF" 2>$null)) {
-            git -C $tinyusb fetch --depth 1 origin "refs/tags/${TINYUSB_REF}:refs/tags/$TINYUSB_REF"
+        # An older SDK from a previous run must be moved to the pinned tag, not
+        # silently reused; the TinyUSB submodule is re-pinned below either way.
+        $sdkTag = (& git -C $SdkPath describe --tags --exact-match 2>$null)
+        if (-not $sdkTag) { $sdkTag = 'unknown revision' }
+        if ($sdkTag -ne $PICO_SDK_REF) {
+            Info "Switching Pico SDK $sdkTag -> $PICO_SDK_REF..."
+            Invoke-GitQuiet -C $SdkPath fetch --depth 1 origin "refs/tags/${PICO_SDK_REF}:refs/tags/$PICO_SDK_REF"
+            if ($GitExit -ne 0) { Die "Could not fetch Pico SDK $PICO_SDK_REF." }
+            Invoke-GitQuiet -C $SdkPath checkout --detach $PICO_SDK_REF
+            if ($GitExit -ne 0) { Die "Could not check out Pico SDK $PICO_SDK_REF." }
+            $sdkSwitched = $true
+        } else {
+            Ok "Pico SDK already at $PICO_SDK_REF."
         }
-        git -C $tinyusb checkout --detach $TINYUSB_REF
+    }
+
+    # Must run before the TinyUSB pin below: submodule update resets every
+    # submodule to the commit the SDK records.
+    Invoke-GitQuiet -C $SdkPath submodule update --init --recursive
+    if ($GitExit -ne 0) { Die 'Pico SDK submodule init failed.' }
+
+    # TinyUSB is pinned to a commit (not a tag), so resolve it first and fetch
+    # it explicitly when this submodule clone has never seen it.
+    $tinyusb = Join-Path $SdkPath 'lib\tinyusb'
+    $tuTarget = (& git -C $tinyusb rev-parse -q --verify "$TINYUSB_REF^{commit}" 2>$null)
+    if (-not $tuTarget) {
+        Info "Fetching TinyUSB $TINYUSB_REF..."
+        Invoke-GitQuiet -C $tinyusb fetch --depth 1 origin $TINYUSB_REF
+        if ($GitExit -ne 0) { Die "Could not fetch TinyUSB $TINYUSB_REF." }
+        $tuTarget = (& git -C $tinyusb rev-parse -q --verify 'FETCH_HEAD^{commit}' 2>$null)
+        if (-not $tuTarget) { Die "Fetched TinyUSB $TINYUSB_REF but could not resolve it." }
+    }
+    $tuHead = (& git -C $tinyusb rev-parse -q --verify 'HEAD' 2>$null)
+    if ($tuHead -ne $tuTarget) {
+        Info "Switching TinyUSB to $TINYUSB_REF..."
+        Invoke-GitQuiet -C $tinyusb checkout --detach $tuTarget
+        if ($GitExit -ne 0) { Die "Could not check out TinyUSB $TINYUSB_REF." }
     } else {
         Ok "TinyUSB already at $TINYUSB_REF."
+    }
+
+    if ($sdkSwitched) {
+        Warn "Pico SDK changed; delete the build folder (or re-run with -Clean) if CMake complains."
     }
 }
 

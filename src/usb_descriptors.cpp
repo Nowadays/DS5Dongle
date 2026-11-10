@@ -26,6 +26,7 @@
 #include "bsp/board_api.h"
 #include "tusb.h"
 #include "config.h"
+#include "usb_descriptors.h"
 #include "usb.h"
 
 #ifndef ENABLE_SERIAL
@@ -50,6 +51,7 @@ enum {
 #endif
 #ifdef ENABLE_WAKE_HID
     ITF_NUM_HID_KBD,
+    ITF_NUM_HID_CONSUMER,
 #endif
     ITF_NUM_TOTAL,
 
@@ -60,15 +62,15 @@ enum {
         0,
 #endif
     CONFIG_DESC_LEN_BASE = 0x00E3 + CONFIG_DESC_LEN_AUDIO_IAD,
-    // Keyboard interface adds 25 bytes:
+    // Keyboard and Consumer Control interfaces add 25 bytes each:
     //   9 (interface) + 9 (HID class) + 7 (EP IN) = 25
-    CONFIG_DESC_LEN_WAKE_KBD =
+    CONFIG_DESC_LEN_SHORTCUT_HID =
 #ifdef ENABLE_WAKE_HID
-        25,
+        50,
 #else
         0,
 #endif
-    CONFIG_DESC_LEN_TOTAL = CONFIG_DESC_LEN_BASE + CONFIG_DESC_LEN_WAKE_KBD
+    CONFIG_DESC_LEN_TOTAL = CONFIG_DESC_LEN_BASE + CONFIG_DESC_LEN_SHORTCUT_HID
 #if ENABLE_SERIAL
         + TUD_CDC_DESC_LEN
 #endif
@@ -138,7 +140,7 @@ uint8_t const *tud_descriptor_device_cb(void) {
 // Configuration Descriptor
 //--------------------------------------------------------------------+
 #ifdef ENABLE_WAKE_HID
-// Shared keyboard interface, HID and endpoint descriptors; only the interface number varies.
+// Shared keyboard interface; only the interface number varies between modes.
 #define WAKE_KEYBOARD_DESCRIPTOR(itf) \
     TUD_HID_DESCRIPTOR(itf, 0, HID_ITF_PROTOCOL_KEYBOARD, 45, 0x87, 8, 10)
 #endif
@@ -392,8 +394,8 @@ uint8_t descriptor_configuration[] = {
     0x00, // bCountryCode: Not localized
     0x01, // bNumDescriptors: 1 report descriptor
     0x22, // bDescriptorType: Report
-    0x41, 0x01, // wDescriptorLength: 321 (0x0141) DS
-    // 0xB5, 0x01, // wDescriptorLength: 437 (0x01B5) DSE
+    0x51, 0x01, // wDescriptorLength: 337 (0x0151) DS
+    // 0xC5, 0x01, // wDescriptorLength: 453 (0x01C5) DSE
 
     // Endpoint Descriptor (HID IN: EP4)
     0x07, // bLength
@@ -417,6 +419,36 @@ uint8_t descriptor_configuration[] = {
 #endif
 #ifdef ENABLE_WAKE_HID
     WAKE_KEYBOARD_DESCRIPTOR(ITF_NUM_HID_KBD),
+
+    // --- INTERFACE DESCRIPTOR (HID Consumer Control) ---
+    // Not a boot device, so subclass/protocol are 0 (unlike the keyboard above).
+    // EP IN 0x88 (0x87 is the keyboard, 0x85/0x86 go to CDC when ENABLE_SERIAL).
+    0x09, // bLength
+    0x04, // bDescriptorType (INTERFACE)
+    ITF_NUM_HID_CONSUMER, // bInterfaceNumber
+    0x00, // bAlternateSetting: 0
+    0x01, // bNumEndpoints: 1 (IN only)
+    0x03, // bInterfaceClass: HID
+    0x00, // bInterfaceSubClass: None
+    0x00, // bInterfaceProtocol: None
+    0x00, // iInterface
+
+    // HID Descriptor (consumer control)
+    0x09, // bLength
+    0x21, // bDescriptorType (HID)
+    0x11, 0x01, // bcdHID: 1.11
+    0x00, // bCountryCode
+    0x01, // bNumDescriptors
+    0x22, // bDescriptorType: Report
+    0x38, 0x00, // wDescriptorLength: 56 (sizeof desc_hid_report_consumer)
+
+    // Endpoint Descriptor (HID IN: EP8)
+    0x07, // bLength
+    0x05, // bDescriptorType (ENDPOINT)
+    0x88, // bEndpointAddress: IN EP8
+    0x03, // bmAttributes: Interrupt
+    0x08, 0x00, // wMaxPacketSize: 8 (2-byte usage, padded)
+    0x0A, // bInterval: 10ms
 #endif
 };
 
@@ -426,7 +458,9 @@ static uint8_t const descriptor_keyboard_only[] = {
                           TUSB_DESC_CONFIG_ATT_SELF_POWERED | TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
     WAKE_KEYBOARD_DESCRIPTOR(0),
 };
+static_assert(sizeof(descriptor_keyboard_only) == TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN);
 #endif
+static_assert(sizeof(descriptor_configuration) == CONFIG_DESC_LEN_TOTAL);
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
 // Application return pointer to descriptor
@@ -445,6 +479,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
             bInterval = 0x02;
             break;
         case 2:
+        case 3:
             bInterval = 0x01;
             break;
     }
@@ -452,22 +487,22 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     descriptor_configuration[offset - 1] = bInterval;
     descriptor_configuration[offset - 8] = bInterval;
     if (ds_mode()) {
-        descriptor_configuration[offset - 16] = 0x41;
+        descriptor_configuration[offset - 16] = 0x51;
     }else {
-        descriptor_configuration[offset - 16] = 0xB5;
+        descriptor_configuration[offset - 16] = 0xC5;
     }
 
-    // Wake / Game Bar are runtime features. Advertise REMOTE_WAKEUP only when wake is
-    // on, and include the keyboard interface (the LAST descriptor block) only when wake
-    // OR the Game Bar shortcut is on. With both off this is byte-identical to the base.
+    // Advertise REMOTE_WAKEUP only when wake is on. Include the keyboard and consumer
+    // interfaces (the LAST two descriptor blocks) when wake or the explicit keyboard
+    // switch is on. With both off this is byte-identical to the base descriptor.
     const bool wake = get_config().enable_wake;
-    const bool kbd = wake || get_config().ps_shortcut_enabled;
+    const bool kbd = wake || get_config().enable_keyboard || get_config().sleep_on_dock;
     descriptor_configuration[7] = wake ? 0xE0 : 0xC0; // bmAttributes (REMOTE_WAKEUP bit)
     const uint16_t total = kbd ? CONFIG_DESC_LEN_TOTAL
-                               : (uint16_t) (CONFIG_DESC_LEN_TOTAL - CONFIG_DESC_LEN_WAKE_KBD);
+                               : (uint16_t) (CONFIG_DESC_LEN_TOTAL - CONFIG_DESC_LEN_SHORTCUT_HID);
     descriptor_configuration[2] = (uint8_t) (total & 0xFF);                  // wTotalLength lo
     descriptor_configuration[3] = (uint8_t) (total >> 8);                    // wTotalLength hi
-    descriptor_configuration[4] = kbd ? ITF_NUM_TOTAL : (ITF_NUM_TOTAL - 1); // bNumInterfaces
+    descriptor_configuration[4] = kbd ? ITF_NUM_TOTAL : (ITF_NUM_TOTAL - 2); // bNumInterfaces
     return descriptor_configuration;
 }
 
@@ -633,10 +668,18 @@ uint8_t const desc_hid_report_ds[] = {
     0x09, 0x3A, //   Usage (Vendor 0x3A)
     0x95, 0x3F, //   Report Count (63)
     0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0x85, 0xFA, //   Report ID (Button remaps)
+    0x09, 0x3B, //   Usage (Vendor 0x3B)
+    0x95, 0x3F, //   Report Count (63)
+    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0x85, 0xFB, //   Report ID (Keyboard shortcut slots)
+    0x09, 0x3C, //   Usage (Vendor 0x3C)
+    0x95, 0x3F, //   Report Count (63)
+    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
     0xC0, // End Collection
-    // 321 bytes
+    // 337 bytes
 };
-static_assert(sizeof(desc_hid_report_ds) == 321);
+static_assert(sizeof(desc_hid_report_ds) == 337);
 
 uint8_t const desc_hid_report_dse[] = {
     0x05, 0x01, // Usage Page (Generic Desktop Ctrls)
@@ -854,13 +897,21 @@ uint8_t const desc_hid_report_dse[] = {
     0x09, 0x3A, //   Usage (Vendor 0x3A)
     0x95, 0x3F, //   Report Count (63)
     0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0x85, 0xFA, //   Report ID (Button remaps)
+    0x09, 0x3B, //   Usage (Vendor 0x3B)
+    0x95, 0x3F, //   Report Count (63)
+    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
+    0x85, 0xFB, //   Report ID (Keyboard shortcut slots)
+    0x09, 0x3C, //   Usage (Vendor 0x3C)
+    0x95, 0x3F, //   Report Count (63)
+    0xB1, 0x02, //   Feature (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position,Non-volatile)
     0xC0, // End Collection
-    // 437 bytes
+    // 453 bytes
 };
-static_assert(sizeof(desc_hid_report_dse) == 437);
+static_assert(sizeof(desc_hid_report_dse) == 453);
 
 #ifdef ENABLE_WAKE_HID
-// 41-byte boot-keyboard report descriptor (modifier byte + reserved + 6 keycodes,
+// 45-byte boot-keyboard report descriptor (modifier byte + reserved + 6 keycodes,
 // no Report ID -- boot protocol forbids one and avoids collision with the gamepad's Report ID 1).
 uint8_t const desc_hid_report_kbd[] = {
     0x05, 0x01,       // Usage Page (Generic Desktop)
@@ -880,14 +931,51 @@ uint8_t const desc_hid_report_kbd[] = {
     0x95, 0x06,       //   Report Count (6)
     0x75, 0x08,       //   Report Size (8)
     0x15, 0x00,       //   Logical Minimum (0)
-    0x25, 0x68,       //   Logical Maximum (104, includes F15)
+    0x25, SHORTCUT_KEY_USAGE_MAX, //   Logical Maximum (Keyboard F24)
     0x05, 0x07,       //   Usage Page (Keyboard/Keypad)
     0x19, 0x00,       //   Usage Minimum (0)
-    0x29, 0x68,       //   Usage Maximum (104, includes F15)
+    0x29, SHORTCUT_KEY_USAGE_MAX, //   Usage Maximum (Keyboard F24)
     0x81, 0x00,       //   Input (Data,Array) -- 6 keycodes
     0xC0              // End Collection
 };
-_Static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor length must match wDescriptorLength in config descriptor");
+
+static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor length must match config descriptor" );
+
+// 56-byte Consumer + System Control report descriptor:
+// Report ID 1: Consumer Control (16-bit usage array)
+// Report ID 2: System Control (System Sleep / Power Down / Wake Up)
+uint8_t const desc_hid_report_consumer[] = {
+    0x05, 0x0C,       // Usage Page (Consumer)
+    0x09, 0x01,       // Usage (Consumer Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x01,       //   Report ID (1)
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x26, SHORTCUT_CONSUMER_USAGE_MAX & 0xFF, SHORTCUT_CONSUMER_USAGE_MAX >> 8, //   Logical Maximum
+    0x19, 0x00,       //   Usage Minimum (0)
+    0x2A, SHORTCUT_CONSUMER_USAGE_MAX & 0xFF, SHORTCUT_CONSUMER_USAGE_MAX >> 8, //   Usage Maximum
+    0x75, 0x10,       //   Report Size (16)
+    0x95, 0x01,       //   Report Count (1)
+    0x81, 0x00,       //   Input (Data,Array,Abs)
+    0xC0,             // End Collection
+
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x80,       // Usage (System Control)
+    0xA1, 0x01,       // Collection (Application)
+    0x85, 0x02,       //   Report ID (2)
+    0x15, 0x01,       //   Logical Minimum (1)
+    0x25, 0x03,       //   Logical Maximum (3)
+    0x75, 0x02,       //   Report Size (2 bits)
+    0x95, 0x01,       //   Report Count (1)
+    0x09, 0x81,       //   Usage (System Power Down)
+    0x09, 0x82,       //   Usage (System Sleep)
+    0x09, 0x83,       //   Usage (System Wake Up)
+    0x81, 0x00,       //   Input (Data,Array,Abs)
+    0x75, 0x06,       //   Report Size (6 bits padding)
+    0x95, 0x01,       //   Report Count (1)
+    0x81, 0x01,       //   Input (Const)
+    0xC0              // End Collection
+};
+static_assert(sizeof(desc_hid_report_consumer) == 56, "consumer report descriptor length must match wDescriptorLength in config descriptor");
 #endif
 
 // Invoked when received GET HID REPORT DESCRIPTOR
@@ -895,14 +983,12 @@ _Static_assert(sizeof(desc_hid_report_kbd) == 45, "keyboard report descriptor le
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
 #ifdef ENABLE_WAKE_HID
-    // The keyboard is HID instance 0 when it is the only function, otherwise 1.
+    // Keyboard-only mode exposes just HID instance 0; composite mode uses 1 and 2.
     if (itf == usb_keyboard_instance()) return desc_hid_report_kbd;
+    if (!usb_keyboard_only && itf == 2) return desc_hid_report_consumer;
+    if (usb_keyboard_only) return nullptr;
 #endif
-    (void) itf;
-    if (ds_mode()) {
-        return desc_hid_report_ds;
-    }
-    return desc_hid_report_dse;
+    return itf == 0 ? (ds_mode() ? desc_hid_report_ds : desc_hid_report_dse) : nullptr;
 }
 
 //--------------------------------------------------------------------+
