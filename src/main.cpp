@@ -426,6 +426,7 @@ int main() {
         cyw43_arch_poll();
         tud_task();
         wake_task();
+        usb_task();
         button_shortcut_task();
         audio_loop();
 #if ENABLE_DEBUG

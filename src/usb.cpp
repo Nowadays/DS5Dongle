@@ -33,6 +33,42 @@ void usb_reconnect(bool keyboard_only) {
     tud_connect();
 }
 
+// Full-device re-enumeration owed once the host is awake again.
+static bool show_controller_pending = false;
+static absolute_time_t show_controller_deadline = nil_time;
+// The remote wakeup resumes the bus within milliseconds when the host honours
+// it. Past this, stop waiting and re-plug as before rather than leave the
+// controller hidden behind a suspend that is never going to end.
+static constexpr uint32_t SHOW_CONTROLLER_WAIT_MS = 3000;
+
+void usb_show_controller(bool identity_changed) {
+    if (!get_config().enable_wake) {
+        // Wake off: the device is hidden while no controller is connected.
+        usb_reconnect(false);
+        return;
+    }
+    // Already enumerated as this controller (e.g. it reconnected to wake a host
+    // that went to sleep with it connected): nothing to change on the bus.
+    if (!usb_keyboard_only && !identity_changed) return;
+    // Dropping off the bus while the host sleeps cancels the remote wakeup that
+    // wake_on_bt_connect() just signalled and leaves the device half
+    // re-enumerated at resume. Wait until the host is back.
+    show_controller_pending = true;
+    show_controller_deadline = make_timeout_time_ms(SHOW_CONTROLLER_WAIT_MS);
+}
+
+void usb_task() {
+    if (!show_controller_pending) return;
+    if (!bt_is_connected()) {
+        show_controller_pending = false;
+        return;
+    }
+    // The wake sequence types its F15 on the interface that is about to go away.
+    if ((tud_suspended() || wake_keyboard_busy()) && !time_reached(show_controller_deadline)) return;
+    show_controller_pending = false;
+    usb_reconnect(false);
+}
+
 uint8_t mute[2] = {}; // 0: SPEAKER(0x02) 1: MIC(0x05)
 float volume[2] = {0.0f,48.0f}; // 0: SPEAKER(0x02) 1: MIC(0x05)
 
