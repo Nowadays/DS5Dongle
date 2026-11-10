@@ -44,7 +44,23 @@ https://github.com/zurce/DS5Dongle-OLED
 请查看[DS5Dongle plan](https://github.com/users/awalol/projects/5)
 
 # 编译
-需要将pico sdk里面的tinyusb版本升级到最新
+
+需要 Pico SDK **2.3.1**，并把 SDK 里的 TinyUSB 子模块切换到 `98741b55`（SDK 自带的子模块仍指向 0.18.0，版本太旧）：
+
+```sh
+git -C <sdk>/lib/tinyusb fetch --depth 1 origin 98741b55959564746998d0453c32d87064629d7c
+git -C <sdk>/lib/tinyusb checkout --detach 98741b55959564746998d0453c32d87064629d7c
+```
+
+然后初始化本仓库的子模块并编译：
+
+```sh
+git submodule update --init --recursive
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH=<sdk>
+cmake --build build --target ds5-bridge
+```
+
+Windows 下可直接运行 `tools\build-windows.ps1`，macOS 下运行 `tools/build-macos.sh`——两个脚本都会自动准备上述版本的 SDK 与 TinyUSB。
 
 # 致谢
  - [rafaelvaloto/Pico_W-Dualsense](https://github.com/rafaelvaloto/Pico_W-Dualsense) - 灵感来源
