@@ -16,6 +16,8 @@
 #include "pico/time.h"
 #include "audio.h"
 #include "usb.h"
+#include "tusb.h"
+#include "wake.h"
 
 extern bool spk_active;
 
@@ -65,6 +67,21 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
             if (audio_mic_active() && get_config().mic_select != 3) flags |= 0x01;
             if (spk_active && get_config().speaker_select != 3) flags |= 0x02;
             buffer[1] = flags;
+            // Bytes 2+: firmware state for troubleshooting (tools/dongle_diag.py).
+            // Older config UIs only read the first two bytes.
+            if (reqlen >= 16) {
+                buffer[2] = 0xD1; // layout marker
+                buffer[3] = (tud_mounted() ? 0x01 : 0) | (tud_suspended() ? 0x02 : 0) |
+                            (usb_keyboard_only ? 0x04 : 0) | (usb_reconfiguring ? 0x08 : 0) |
+                            (bt_is_connected() ? 0x10 : 0) | (usb_show_controller_pending() ? 0x20 : 0);
+                uint8_t ready = 0;
+                for (uint8_t i = 0; i < CFG_TUD_HID; ++i) {
+                    if (tud_hid_n_ready(i)) ready |= static_cast<uint8_t>(1u << i);
+                }
+                buffer[4] = ready;
+                buffer[5] = button_shortcut_diag();
+                return static_cast<uint16_t>(6 + wake_diag(buffer + 6, 8));
+            }
             return 2;
         }
 #if ENABLE_VERBOSE

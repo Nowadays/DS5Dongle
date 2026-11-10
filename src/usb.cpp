@@ -57,6 +57,8 @@ void usb_show_controller(bool identity_changed) {
     show_controller_deadline = make_timeout_time_ms(SHOW_CONTROLLER_WAIT_MS);
 }
 
+bool usb_show_controller_pending() { return show_controller_pending; }
+
 void usb_task() {
     if (!show_controller_pending) return;
     if (!bt_is_connected()) {

@@ -29,6 +29,7 @@
 #define WAKE_KEY_UP_SETTLE_US 200000   // 200 ms between attempts (or before DONE)
 #define WAKE_REQUEST_TIMEOUT_US 5000000
 #define WAKE_KEY_ATTEMPTS     2
+#define WAKE_BUSY_TIMEOUT_US  6000000  // 6 s: longest a wake attempt may hold the keyboard endpoint
 #define WAKE_DISCONNECT_DEBOUNCE_US 3000000  // 3s: only disconnect (and thereby power off) the
                                              // controller after a sustained suspend; ignore brief
                                              // hub-induced suspends while the host is awake.
@@ -78,6 +79,26 @@ static volatile uint64_t suspend_at_us = 0;
 // During a deliberate USB reconnect, ignore the suspend it triggers until this time.
 static volatile uint64_t reconnect_until_us = 0;
 
+// Diagnostics, read by the host through feature report 0xF9 (cmd.cpp).
+static volatile uint8_t diag_suspends = 0;
+static volatile uint8_t diag_resumes = 0;
+static volatile uint8_t diag_mounts = 0;
+static volatile uint8_t diag_wake_requests = 0;
+static volatile uint8_t diag_wake_forced = 0;
+static volatile uint8_t diag_wake_timeouts = 0;
+
+uint8_t wake_diag(uint8_t *out, uint8_t len) {
+    const uint8_t data[] = {
+        static_cast<uint8_t>(state),
+        static_cast<uint8_t>(host_suspended ? 1 : 0),
+        diag_suspends, diag_resumes, diag_mounts,
+        diag_wake_requests, diag_wake_forced, diag_wake_timeouts,
+    };
+    const uint8_t n = len < sizeof(data) ? len : sizeof(data);
+    memcpy(out, data, n);
+    return n;
+}
+
 static void enter_state(wake_state_t s) {
     state = s;
     state_entered_us = time_us_64();
@@ -85,6 +106,7 @@ static void enter_state(wake_state_t s) {
 
 static void request_host_wake(const char *reason) {
     bool ok = tud_remote_wakeup();
+    diag_wake_requests++;
 
     // Linux quirk: Sometimes Linux fails to set the REMOTE_WAKEUP feature
     // flag before the second suspend, causing TinyUSB to refuse to wake.
@@ -92,6 +114,7 @@ static void request_host_wake(const char *reason) {
     if (!ok && host_suspended) {
         WAKE_DBG("%s: tud_remote_wakeup()=0 but suspended. Forcing DCD wake.", reason);
         dcd_remote_wakeup(0);
+        diag_wake_forced++;
         ok = true;
     }
 
@@ -142,6 +165,7 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     suspend_at_us = time_us_64();
     host_suspended = true;
     host_resumed_event = false;
+    diag_suspends++;
     
     // Everything below is the wake-UP path (press a key to wake the host) -- enable_wake only.
     if (!get_config().enable_wake) return;
@@ -170,6 +194,7 @@ void wake_on_bt_connect(void) {
 
 extern "C" void tud_resume_cb(void) {
     WAKE_DBG("tud_resume_cb state=%s", wake_state_name(state));
+    diag_resumes++;
     host_suspended = false;
     host_resumed_event = true;
     suspend_at_us = 0;   // resumed before the debounce elapsed -> cancel the disconnect
@@ -189,6 +214,7 @@ extern "C" void tud_mount_cb(void) {
     button_shortcut_reset();
     usb_reconfiguring = false;
     WAKE_DBG("tud_mount_cb state=%s", wake_state_name(state));
+    diag_mounts++;
     host_suspended = false;
     host_resumed_event = true;
     suspend_at_us = 0;
@@ -283,6 +309,21 @@ void wake_task(void) {
     const wake_state_t s = state;
     const uint64_t entered = state_entered_us;
     critical_section_exit(&wake_cs);
+
+    // While the sequence is in one of these states it owns the keyboard endpoint
+    // and every shortcut is paused (wake_keyboard_busy()). If the endpoint never
+    // becomes ready again the F15 cannot be sent, so give up rather than leave
+    // the shortcuts dead until a re-plug.
+    if ((s == WAKE_REQUESTED || s == WAKE_KEY_DOWN || s == WAKE_KEY_UP_SENT) &&
+        now - entered > WAKE_BUSY_TIMEOUT_US) {
+        WAKE_DBG("%s stuck -> DONE", wake_state_name(s));
+        diag_wake_timeouts++;
+        critical_section_enter_blocking(&wake_cs);
+        enter_state(WAKE_DONE);
+        key_attempts = 0;
+        critical_section_exit(&wake_cs);
+        return;
+    }
 
     switch (s) {
         case WAKE_IDLE:

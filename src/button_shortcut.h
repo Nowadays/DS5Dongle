@@ -55,6 +55,8 @@ void trigger_host_sleep();
 // One timed keyboard pulse outside the configurable slots (shoulder_combo.cpp).
 // False when the keyboard endpoint is busy; the caller retries on a later tick.
 bool button_shortcut_send_pulse(uint8_t modifiers, uint8_t key);
+// State bits for the 0xF9 diagnostics.
+uint8_t button_shortcut_diag();
 #else
 // No keyboard/consumer HID interface to fire into: keep the call sites clean
 // instead of sprinkling #ifdef through main.cpp and wake.cpp.
@@ -63,4 +65,5 @@ static inline void button_shortcut_reset() {}
 static inline void button_shortcut_task() {}
 static inline void button_shortcut_start_learning() {}
 static inline void trigger_host_sleep() {}
+static inline uint8_t button_shortcut_diag() { return 0; }
 #endif

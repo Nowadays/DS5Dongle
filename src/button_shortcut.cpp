@@ -458,6 +458,13 @@ void button_shortcut_tick(const USBGetStateData &state) {
     button_shortcut_task();
 }
 
+uint8_t button_shortcut_diag() {
+    return (shortcuts_available() ? 0x01 : 0) | (release_pending ? 0x02 : 0) |
+           (keyboard_clear_pending ? 0x04 : 0) | (consumer_clear_pending ? 0x08 : 0) |
+           (wake_owned_keyboard ? 0x10 : 0) | (shortcut_learning ? 0x20 : 0) |
+           (host_sleep_pending ? 0x40 : 0) | (keyboard_dirty ? 0x80 : 0);
+}
+
 void button_shortcut_start_learning() {
     shortcut_learning = true;
     shortcut_learning_reset = false;
