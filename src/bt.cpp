@@ -721,7 +721,6 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                 printf_hexdump(packet, size);
 #endif
                 if (report_id == 0x20) {
-                    const bool was_dse = is_dse;
                     if (packet[23] == 0x44) {
                         printf("Connected DSE Controller\n");
                         is_dse = true;
@@ -734,7 +733,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                         is_dse = false;
                     }
 #if !ENABLE_SERIAL
-                    usb_show_controller(is_dse != was_dse);
+                    usb_show_controller();
 #endif
                 }
             }

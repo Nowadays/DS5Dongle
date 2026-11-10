@@ -37,22 +37,22 @@ void usb_reconnect(bool keyboard_only) {
 static bool show_controller_pending = false;
 static absolute_time_t show_controller_deadline = nil_time;
 // The remote wakeup resumes the bus within milliseconds when the host honours
-// it. Past this, stop waiting and re-plug as before rather than leave the
-// controller hidden behind a suspend that is never going to end.
+// it. Past this, a keyboard-only device stops waiting and re-plugs anyway
+// rather than keep the controller hidden behind a suspend that may only be the
+// host idling the keyboard (selective suspend), not a sleeping host.
 static constexpr uint32_t SHOW_CONTROLLER_WAIT_MS = 3000;
 
-void usb_show_controller(bool identity_changed) {
+void usb_show_controller() {
     if (!get_config().enable_wake) {
         // Wake off: the device is hidden while no controller is connected.
         usb_reconnect(false);
         return;
     }
-    // Already enumerated as this controller (e.g. it reconnected to wake a host
-    // that went to sleep with it connected): nothing to change on the bus.
-    if (!usb_keyboard_only && !identity_changed) return;
-    // Dropping off the bus while the host sleeps cancels the remote wakeup that
+    // The re-plug is what makes the host set a freshly connected controller up
+    // again (light bar, audio, ...), so it is always owed. But dropping off the
+    // bus while the host sleeps cancels the remote wakeup that
     // wake_on_bt_connect() just signalled and leaves the device half
-    // re-enumerated at resume. Wait until the host is back.
+    // re-enumerated at resume: usb_task() does it once the host is back.
     show_controller_pending = true;
     show_controller_deadline = make_timeout_time_ms(SHOW_CONTROLLER_WAIT_MS);
 }
@@ -66,7 +66,11 @@ void usb_task() {
         return;
     }
     // The wake sequence types its F15 on the interface that is about to go away.
-    if ((tud_suspended() || wake_keyboard_busy()) && !time_reached(show_controller_deadline)) return;
+    if (tud_suspended() || wake_keyboard_busy()) {
+        // Already the full device: the host went to sleep with the controller
+        // connected, so this suspend is a real sleep. Wait for it to end.
+        if (!usb_keyboard_only || !time_reached(show_controller_deadline)) return;
+    }
     show_controller_pending = false;
     usb_reconnect(false);
 }
