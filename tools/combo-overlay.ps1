@@ -33,7 +33,6 @@ $labels = @{
 $mutex = New-Object System.Threading.Mutex($false, 'DS5Dongle_ComboOverlay')
 try { if (-not $mutex.WaitOne(0)) { exit 0 } } catch [System.Threading.AbandonedMutexException] { }
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 Add-Type -Namespace DS5 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
@@ -42,10 +41,19 @@ Add-Type -Namespace DS5 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
 [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int Size; public RECT Monitor, Work; public uint Flags; }
 '@
+
+# DPI "Per-Monitor V2" (Windows 10 1703+), à fixer avant le chargement de WPF :
+# sans cela le processus est en DPI système et, sur un écran dont l'échelle
+# diffère de celle de l'écran principal, Windows étire l'image (overlay flou et
+# mal dimensionné). -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2.
+[DS5.Native]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
+[AppContext]::SetSwitch('Switch.System.Windows.DoNotScaleForDpiChanges', $false)
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -115,11 +123,9 @@ $raise.Add_Tick({
         $SWP_NOSIZE -bor $SWP_NOMOVE -bor $SWP_NOACTIVATE) | Out-Null
 })
 
-function Show-Overlay {
-    $script:deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
-    if (-not $window.IsVisible) { $window.Show() }
-    # Centré sur l'écran de la fenêtre active (celui du jeu), pas sur celui de
-    # la souris. MONITOR_DEFAULTTOPRIMARY = 1.
+# Centre l'overlay sur l'écran de la fenêtre active (celui du jeu), pas sur
+# celui de la souris. MONITOR_DEFAULTTOPRIMARY = 1.
+function Move-OverlayToActiveScreen {
     $info = New-Object DS5.Native+MONITORINFO
     $info.Size = [Runtime.InteropServices.Marshal]::SizeOf($info)
     $monitor = [DS5.Native]::MonitorFromWindow([DS5.Native]::GetForegroundWindow(), 1)
@@ -131,7 +137,18 @@ function Show-Overlay {
         $y = $m.Top + [int](($m.Bottom - $m.Top - $h) / 2)
         [DS5.Native]::SetWindowPos($hwnd, $HWND_TOPMOST, $x, $y, 0, 0, $SWP_NOSIZE -bor $SWP_NOACTIVATE) | Out-Null
     }
-    $window.Opacity = 1
+}
+
+function Show-Overlay {
+    $script:deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
+    if (-not $window.IsVisible) { $window.Opacity = 0; $window.Show() }
+    Move-OverlayToActiveScreen
+    # En arrivant sur un écran d'échelle différente, WPF redimensionne la
+    # fenêtre : on recentre une fois la mise en page refaite, puis on révèle.
+    $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ContextIdle, [Action] {
+        Move-OverlayToActiveScreen
+        $window.Opacity = 1
+    }) | Out-Null
     $raise.Start()
 }
 
